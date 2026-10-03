@@ -1,6 +1,7 @@
-import { useMemo, useState } from 'react';
+import { useEffect, useMemo, useState } from 'react';
+import { supabase } from './lib/supabaseClient';
 
-type Screen = 'home' | 'profile' | 'level' | 'exercise' | 'result' | 'progress' | 'settings';
+type Screen = 'home' | 'profile' | 'level' | 'exercise' | 'result' | 'progress' | 'settings' | 'help';
 type Profile = 'senior' | 'family' | 'standard';
 type Difficulty = 'easy' | 'medium' | 'hard';
 type ExerciseKey =
@@ -19,8 +20,23 @@ type ExerciseItem = {
   description: string;
 };
 
+type GameSettings = {
+  fontSize: 'small' | 'normal' | 'large';
+  contrast: 'normal' | 'high';
+  notifications: boolean;
+  language: 'fr';
+};
+
+type SessionRecord = {
+  id: string;
+  score: number;
+  createdAt: string;
+};
+
+const STORAGE_KEY = 'memoryplus-state-v1';
+
 const exercises: ExerciseItem[] = [
-  { key: 'numbers', label: 'Mémoire de chiffres', description: 'Mémorisez et reproduisez une suite numérique.' },
+  { key: 'numbers', label: 'Mémoire de chiffres', description: 'Mémorisez puis reproduisez la suite numérique.' },
   { key: 'visual', label: 'Mémoire visuelle', description: 'Retrouvez les objets déjà vus.' },
   { key: 'words', label: 'Mémorisation de mots', description: 'Rappelez les mots dans l’ordre.' },
   { key: 'shapes', label: 'Séquences de formes', description: 'Reproduisez la suite visuelle.' },
@@ -56,6 +72,13 @@ const shapeSequence = [
   ['vert', 'jaune', 'vert', 'jaune', 'vert'],
 ];
 
+const defaultSettings: GameSettings = {
+  fontSize: 'normal',
+  contrast: 'normal',
+  notifications: true,
+  language: 'fr',
+};
+
 function buildSequence(length: number) {
   return Array.from({ length }, () => Math.floor(Math.random() * 9));
 }
@@ -77,11 +100,73 @@ function App() {
   const [logicAnswer, setLogicAnswer] = useState('');
   const [attentionPrompt, setAttentionPrompt] = useState('Trouver le mot rouge');
   const [attentionAnswer, setAttentionAnswer] = useState('');
+  const [settings, setSettings] = useState<GameSettings>(defaultSettings);
 
   const selectedExerciseMeta = useMemo(
     () => exercises.find((exercise) => exercise.key === selectedExercise) ?? exercises[0],
     [selectedExercise],
   );
+
+  useEffect(() => {
+    const raw = localStorage.getItem(STORAGE_KEY);
+    if (!raw) return;
+
+    try {
+      const parsed = JSON.parse(raw) as Partial<{
+        profile: Profile;
+        difficulty: Difficulty;
+        score: number;
+        history: number[];
+        sessionCount: number;
+        settings: GameSettings;
+      }>;
+
+      if (parsed.profile) setProfile(parsed.profile);
+      if (parsed.difficulty) setDifficulty(parsed.difficulty);
+      if (typeof parsed.score === 'number') setScore(parsed.score);
+      if (Array.isArray(parsed.history)) setHistory(parsed.history);
+      if (typeof parsed.sessionCount === 'number') setSessionCount(parsed.sessionCount);
+      if (parsed.settings) setSettings({ ...defaultSettings, ...parsed.settings });
+    } catch (error) {
+      console.warn('Impossible de lire la progression locale', error);
+    }
+  }, []);
+
+  useEffect(() => {
+    const payload = {
+      profile,
+      difficulty,
+      score,
+      history,
+      sessionCount,
+      settings,
+    };
+    localStorage.setItem(STORAGE_KEY, JSON.stringify(payload));
+  }, [profile, difficulty, score, history, sessionCount, settings]);
+
+  useEffect(() => {
+    const root = document.documentElement;
+    root.style.setProperty('--font-scale', settings.fontSize === 'small' ? '0.92' : settings.fontSize === 'large' ? '1.12' : '1');
+    root.style.setProperty('--contrast-bg', settings.contrast === 'high' ? '#f8fafc' : '#f5f7fb');
+    root.style.setProperty('--contrast-text', settings.contrast === 'high' ? '#020617' : '#0f172a');
+  }, [settings]);
+
+  const saveToSupabase = async (exerciseName: string, currentScore: number) => {
+    if (!supabase) return;
+
+    try {
+      await supabase.from('sessions').insert([
+        {
+          profile_id: 'demo-profile',
+          exercise_name: exerciseName,
+          score: currentScore,
+          total: 1,
+        },
+      ]);
+    } catch (error) {
+      console.warn('Supabase indisponible ou non configuré', error);
+    }
+  };
 
   const startExercise = (exerciseKey: ExerciseKey) => {
     setSelectedExercise(exerciseKey);
@@ -147,33 +232,35 @@ function App() {
 
     if (selectedExercise === 'shapes') {
       const normalized = logicAnswer.trim().toLowerCase();
-      passed = normalized === 'rouge' || normalized === 'bleu' || normalized === 'vert';
+      passed = ['rouge', 'bleu', 'vert'].includes(normalized);
     }
 
     if (selectedExercise === 'attention') {
       const normalized = attentionAnswer.trim().toLowerCase();
-      passed = normalized === 'rouge' || normalized === 'rond' || normalized === 'bleu';
+      passed = ['rouge', 'rond', 'bleu'].includes(normalized);
     }
 
     if (selectedExercise === 'differences') {
       const normalized = answer.trim().toLowerCase();
-      passed = normalized === '2' || normalized === 'deux';
+      passed = ['2', 'deux'].includes(normalized);
     }
 
     if (selectedExercise === 'logic') {
       const normalized = logicAnswer.trim().toLowerCase();
-      passed = normalized === '16' || normalized === 'grand' || normalized === 'cercle';
+      passed = ['16', 'grand', 'cercle'].includes(normalized);
     }
 
     if (selectedExercise === 'missing') {
       const normalized = answer.trim().toLowerCase();
-      passed = normalized === 'maison' || normalized === 'lampe';
+      passed = ['maison', 'lampe'].includes(normalized);
     }
 
     const nextScore = passed ? 1 : 0;
-    setScore((prev) => prev + nextScore);
+    const nextTotalScore = score + nextScore;
+    setScore(nextTotalScore);
     setSessionCount((prev) => prev + 1);
     setHistory((prev) => [...prev, nextScore]);
+    void saveToSupabase(selectedExerciseMeta.label, nextScore);
     setScreen('result');
   };
 
@@ -243,9 +330,9 @@ function App() {
           <>
             <h2>Choisissez votre niveau</h2>
             <div className="selection-list">
-              <button onClick={() => { setDifficulty('easy'); startExercise(selectedExercise); }}>Débutant</button>
-              <button onClick={() => { setDifficulty('medium'); startExercise(selectedExercise); }}>Intermédiaire</button>
-              <button onClick={() => { setDifficulty('hard'); startExercise(selectedExercise); }}>Avancé</button>
+              <button onClick={() => { setDifficulty('easy'); setScreen('exercise'); }}>Débutant</button>
+              <button onClick={() => { setDifficulty('medium'); setScreen('exercise'); }}>Intermédiaire</button>
+              <button onClick={() => { setDifficulty('hard'); setScreen('exercise'); }}>Avancé</button>
             </div>
           </>
         )}
@@ -437,15 +524,17 @@ function App() {
             <div className="settings-list">
               <div className="setting-item">
                 <span>Taille du texte</span>
-                <button className="small-btn">Standard</button>
+                <button className="small-btn" onClick={() => setSettings((prev) => ({ ...prev, fontSize: prev.fontSize === 'large' ? 'normal' : 'large' }))}>Standard</button>
               </div>
               <div className="setting-item">
                 <span>Contraste</span>
-                <button className="small-btn">Fort</button>
+                <button className="small-btn" onClick={() => setSettings((prev) => ({ ...prev, contrast: prev.contrast === 'high' ? 'normal' : 'high' }))}>Fort</button>
               </div>
               <div className="setting-item">
                 <span>Notifications</span>
-                <button className="small-btn">Oui</button>
+                <button className="small-btn" onClick={() => setSettings((prev) => ({ ...prev, notifications: !prev.notifications }))}>
+                  {settings.notifications ? 'Oui' : 'Non'}
+                </button>
               </div>
               <div className="setting-item">
                 <span>Langue</span>
